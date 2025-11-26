@@ -124,7 +124,7 @@ cacheSize = 100000
 
 #PANEL----------------------------------------------------------------------------------------------------------
 def load_bundled_font():
-    """加载特定的默认内置字体"""
+
     try:
         addon_dir = os.path.dirname(os.path.realpath(__file__))
         font_filename = "AlibabaPuHuiTi-3-95-ExtraBold.ttf" 
@@ -439,7 +439,6 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
     bl_description = "搭建影棚、自动上色、生成悬浮数据展示"
 
     def create_terrain_shader(self, map_obj):
-        """自动创建基于高度的分层材质"""
         if not map_obj or map_obj.type != 'MESH': return
         
         mat_name = "Pro_Terrain_Shader"
@@ -499,7 +498,7 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         mapping.inputs['Location'].default_value = (0, 0, 0)
 
     def create_floating_text(self, text_str, location, size, col, is_title=False):
-        """创建渲染专用的悬浮文字"""
+
         font_curve = bpy.data.curves.new(type="FONT", name="Render_Text_Data")
         font_curve.body = text_str
         font_curve.align_x = 'LEFT'
@@ -541,13 +540,11 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         scene = context.scene
         props = context.scene.tp3d
         
-        # --- 0. 关键保护：先获取并锁定选中对象 ---
         target_objs = context.selected_objects
         if not target_objs:
             self.report({'WARNING'}, "请先选中地图！")
             return {'CANCELLED'}
 
-        # 1. 渲染设置
         scene.render.resolution_x = 1920
         scene.render.resolution_y = 1080
         scene.render.engine = 'BLENDER_EEVEE'
@@ -559,27 +556,22 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
                 scene.eevee.use_soft_shadows = True
         except: pass
 
-        # 2. 准备集合 (【已修复】加入防误删逻辑)
         col_name = "XHS_Studio_Collection"
         if col_name in bpy.data.collections:
             col = bpy.data.collections[col_name]
             
-            # 收集需要清理的旧对象
             objs_to_remove = []
             for obj in col.objects:
-                # 【保护机制】绝对不删选中的物体，也不删网格(Mesh)
                 if obj in target_objs or obj.type == 'MESH':
                     continue
                 objs_to_remove.append(obj)
             
-            # 安全删除
             for obj in objs_to_remove:
                 bpy.data.objects.remove(obj, do_unlink=True)
         else:
             col = bpy.data.collections.new(col_name)
             context.scene.collection.children.link(col)
 
-        # 3. 处理地图主体
         min_v = Vector((float('inf'), float('inf'), float('inf')))
         max_v = Vector((float('-inf'), float('-inf'), float('-inf')))
         
@@ -597,10 +589,9 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         map_size_vec = max_v - min_v
         map_radius = max(map_size_vec.x, map_size_vec.y) / 2
         
-        # 【关键数据】地图最低点 Z 坐标
         map_bottom_z = min_v.z
 
-        # 4. 生成数据文字 (【已修复】底部对齐 + 5行数据)
+
         d_name = props.trailName if props.trailName else "我的轨迹"
         
         lines_to_show = []
@@ -615,12 +606,10 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         
         line_step = info_size * 1.8      
         title_data_gap = title_size * 1.5 
-        
-        # 计算布局高度 (倒推法)
+
         num_lines = len(lines_to_show)
         if num_lines > 0:
             data_block_height = (num_lines - 1) * line_step
-            # 标题的Z = 底部 + 数据高度 + 标题间隙
             title_z_pos = map_bottom_z + data_block_height + title_data_gap
         else:
             title_z_pos = map_bottom_z
@@ -631,11 +620,9 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
 
         txt_objs = []
         
-        # 生成标题
         title_pos = Vector((text_x, text_y, title_z_pos))
         txt_objs.append(self.create_floating_text(d_name, title_pos, title_size, col, is_title=True))
         
-        # 生成数据 (从上往下，但起点是算好的，所以终点会对齐底部)
         current_z = title_z_pos - title_data_gap
         data_pos_x = text_x 
         
@@ -645,7 +632,6 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
             txt_objs.append(self.create_floating_text(final_str, line_pos, info_size, col))
             current_z -= line_step
 
-        # 5. 智能构图
         for t_obj in txt_objs:
             min_v.x = min(min_v.x, t_obj.location.x)
             max_v.x = max(max_v.x, t_obj.location.x + map_radius) 
@@ -656,8 +642,6 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         final_size = max_v - min_v
         final_max_dim = max(final_size.x, final_size.y)
 
-# 6. 相机与灯光 (【高级感升级版】：深邃背景 + 强对比光照)
-# 6. 相机与灯光 (修正版：高级深灰背景 + 标准色彩管理)
         cam_data = bpy.data.cameras.new("XHS_Camera")
         cam_obj = bpy.data.objects.new("XHS_Camera", cam_data)
         col.objects.link(cam_obj)
@@ -669,49 +653,42 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         cam_obj.location = final_center + Vector((0, -1000, 200))
         cam_obj.rotation_euler = (math.radians(75), 0, 0)
 
-        # --- 【核心修复 1】强制切换色彩管理 ---
-        # 之前死黑是因为 Filmic/AgX 模式把暗部压没了，必须用 Standard
         if context.scene.view_settings.view_transform != 'Standard':
             context.scene.view_settings.view_transform = 'Standard'
-        context.scene.view_settings.look = 'High Contrast' # 增加反差，去除灰雾感
+        context.scene.view_settings.look = 'High Contrast' 
 
-        # --- 【核心修复 2】灯光强度翻倍 ---
-        # 灯光 A: 主光 (强度由 3.9 -> 8.0)
+
         light_main = bpy.data.lights.new("Key", 'SUN')
         light_main.energy = 2.0
-        light_main.angle = math.radians(20) # 柔化阴影边缘
-        light_main.color = (1.0, 0.96, 0.9) # 暖白
+        light_main.angle = math.radians(20) 
+        light_main.color = (1.0, 0.96, 0.9) 
         obj_main = bpy.data.objects.new("Key", light_main)
         col.objects.link(obj_main)
         obj_main.rotation_euler = (math.radians(50), math.radians(10), math.radians(30))
         
-        # 灯光 B: 轮廓光 (位置优化，防止照不到背面)
-        light_rim = bpy.data.lights.new("Rim", 'SUN') # 改用 SUN，保证任何距离都能照亮轮廓
+
+        light_rim = bpy.data.lights.new("Rim", 'SUN') 
         light_rim.energy = 4.0 
-        light_rim.color = (0.2, 0.6, 1.0) # 科技蓝
-        light_rim.angle = math.radians(5) # 硬光，勾勒线条
+        light_rim.color = (0.2, 0.6, 1.0) 
+        light_rim.angle = math.radians(5) 
         obj_rim = bpy.data.objects.new("Rim", light_rim)
         col.objects.link(obj_rim)
-        # 从左后方打光
         obj_rim.rotation_euler = (math.radians(60), 0, math.radians(220))
 
-        # 灯光 C: 补光 (提亮暗部细节)
+
         light_fill = bpy.data.lights.new("Fill", 'SUN')
         light_fill.energy = 4.0 
-        light_fill.color = (0.7, 0.7, 0.8) # 冷白
+        light_fill.color = (0.7, 0.7, 0.8) 
         obj_fill = bpy.data.objects.new("Fill", light_fill)
         col.objects.link(obj_fill)
         obj_fill.rotation_euler = (math.radians(80), 0, math.radians(160))
 
-        # --- 【核心修复 3】背景改为高级深灰 ---
+
         context.scene.world.use_nodes = True
         bg_node = context.scene.world.node_tree.nodes['Background']
-        # 不要用 (0,0,0) 死黑，改用 (0.05, 0.05, 0.06) 深灰蓝
-        # 这样能保留背景的存在感，同时突出文字
         bg_node.inputs['Color'].default_value = (0.05, 0.05, 0.07, 1) 
         bg_node.inputs['Strength'].default_value = 1.0
 
-        # 7. 切换视图
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
                 for space in area.spaces:
@@ -753,7 +730,7 @@ class MY_OT_JoinDiscord(bpy.types.Operator):
 class MY_OT_OpenXHS(bpy.types.Operator):
     bl_idname = "wm.open_xhs"
     bl_label = "小红书主页"
-    bl_description = "关注炸师傅，获取更多教程" # 鼠标悬停时的提示
+    bl_description = "关注炸师傅，获取更多教程" 
 
     def execute(self, context):
         webbrowser.open("https://xhslink.com/m/6KI45KF8eW3")
@@ -790,26 +767,24 @@ class MY_OT_Rescale(bpy.types.Operator):
         for obj in selected_objects:      
             print(obj.name)
             if lowestZ != 1000 and obj.type == "MESH":
-                    bpy.context.view_layer.objects.active = obj  # Make it active
+                    bpy.context.view_layer.objects.active = obj 
                     bpy.ops.object.mode_set(mode='EDIT')
-                    # Access mesh data
                     mesh = bmesh.from_edit_mesh(obj.data)
                     for v in mesh.verts:
                         if v.co.z > 0.1:
                             v.co.z = (v.co.z - lowestZ) * (multiZ) + lowestZ
                     bmesh.update_edit_mesh(obj.data)    
-                    bpy.ops.object.mode_set(mode='OBJECT')  # Exit Edit Mode  
+                    bpy.ops.object.mode_set(mode='OBJECT')  
             if lowestZ != 1000 and obj.type =="CURVE":
-                # Access curve splines
                 for spline in obj.data.splines:
                     for point in spline.bezier_points:
                         if point.co.z > -0.5:
                             point.co.z = (point.co.z - lowestZ) * (multiZ) + lowestZ
-                    for point in spline.points:  # For NURBS
+                    for point in spline.points: 
                         if point.co.z > -0.5:
                             point.co.z = (point.co.z - lowestZ) * (multiZ) + lowestZ
 
-            bpy.ops.object.mode_set(mode='OBJECT')  # Exit Edit Mode
+            bpy.ops.object.mode_set(mode='OBJECT') 
 
             if "Elevation Scale" in obj:
                 obj["Elevation Scale"] *= multiZ
@@ -840,7 +815,6 @@ class MY_OT_thicken(bpy.types.Operator):
             return {'CANCELLED'}
 
         for zobj in selected_objects:
-            # Check if the custom property 'Object type' exists
             if "Object type" in zobj:
                 print(zobj.name)
                 if zobj["Object type"] == "TRAIL" or zobj["Object type"] == "WATER" or zobj["Object type"] == "FOREST" or zobj["Object type"] == "CITY":
@@ -868,10 +842,7 @@ class MY_OT_thicken(bpy.types.Operator):
         bpy.context.view_layer.objects.active = selected_objects[0]
         for zobj in selected_objects:
             zobj.select_set(True)
-
-                    
-
-
+            
         return {'FINISHED'}
 
 class MY_OT_PinCoords(bpy.types.Operator):
@@ -1078,11 +1049,9 @@ class MY_OT_Dovetail(bpy.types.Operator):
             #get the lowest zValue of one the faces
             zValue = 0
 
-            # Switch to Edit Mode
-            #bpy.ops.object.mode_set(mode='EDIT')
+
             mesh = bmesh.from_edit_mesh(zobj.data)
 
-            # Get the world matrix to convert local to global coordinates
             world_matrix = zobj.matrix_world
 
             # Collect global Z-values of selected faces
@@ -1227,18 +1196,7 @@ class MY_OT_BottomMark(bpy.types.Operator):
         for zobj in selected_objects:
             zobj.select_set(True)
 
-
-
         return{'FINISHED'}
-    
-
-
-
-
-
-    
-
-    
 
 class MY_OT_ColorMountain(bpy.types.Operator):
     bl_idname="wm.colormountain"
@@ -1735,7 +1693,6 @@ class MY_PT_StudioSettings(bpy.types.Panel):
         layout = self.layout
         props = context.scene.tp3d
         
-# 标题
         layout.label(text="自定义渲染数据（留空不显示）", icon='FONT_DATA')
 
         box = layout.box()
@@ -1839,13 +1796,6 @@ class OBJECT_OT_ShowCustomPropsPopup(bpy.types.Operator):
         width = self.DOUBLE_WIDTH if len(custom_props) > self.MAX_PER_COLUMN else self.NORMAL_WIDTH
         return context.window_manager.invoke_props_dialog(self, width=width)
 
-# Register the classes and properties
-
-
-
-#--------------------------------------------------
-#Debug
-#--------------------------------------------------
 
 def load_counter():
     if os.path.exists(counter_file):
@@ -1902,14 +1852,9 @@ def send_api_request(addition = ""):
 
     bpy.context.window_manager.popup_menu(draw_warning, title="TrailPrint3D 汉化版", icon='INFO')
 
-
-# -----------------------------------------------------------------------------
-# 注册与注销
-# -----------------------------------------------------------------------------
-
 def register():
 
-    # 先注册所有 Operator（不包括 Panel）
+
     bpy.utils.register_class(MyProperties)
     bpy.utils.register_class(MY_OT_runGeneration)
     bpy.utils.register_class(MY_OT_ExportSTL)
@@ -1927,27 +1872,20 @@ def register():
     bpy.utils.register_class(MY_OT_BottomMark)
     bpy.utils.register_class(MY_OT_ColorMountain)
     bpy.utils.register_class(MY_OT_ContourLines)
-
-    # 再注册 Panel（Panel 必须放在最后）
     bpy.utils.register_class(MY_PT_Generate)
     bpy.utils.register_class(MY_PT_Advanced)
     bpy.utils.register_class(MY_PT_StudioSettings)
-
-    # 所有 class 注册完后，最后创建 PointerProperty
     bpy.types.Scene.tp3d = bpy.props.PointerProperty(type=MyProperties)
 
     print("TrailPrint3D(CN) System Loaded.")
 
 
 def unregister():
-    # 先删 PointerProperty
     del bpy.types.Scene.tp3d
-
-    # 按注册时逆序注销（最安全）
+    
     bpy.utils.unregister_class(MY_PT_StudioSettings)
     bpy.utils.unregister_class(MY_PT_Advanced)
     bpy.utils.unregister_class(MY_PT_Generate)
-
     bpy.utils.unregister_class(MY_OT_ContourLines)
     bpy.utils.unregister_class(MY_OT_ColorMountain)
     bpy.utils.unregister_class(MY_OT_BottomMark)
@@ -1965,8 +1903,6 @@ def unregister():
     bpy.utils.unregister_class(MY_OT_ExportSTL)
     bpy.utils.unregister_class(MY_OT_runGeneration)
     bpy.utils.unregister_class(MyProperties)
-
-    # 兼容你之前的 MY_PT_Shapes（如果存在）
     try:
         bpy.utils.unregister_class(MY_PT_Shapes)
     except:
@@ -2618,9 +2554,6 @@ def convert_to_blender_coordinates(lat, lon, elevation,timestamp):
     y = R * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)) * scaleHor
     z = (elevation - elevationOffset) /1000 * scaleElevation * autoScale
     
-    
-    
-    
     return (x, y, z)
 
 # Convert offsets to latitude/longitude
@@ -3077,9 +3010,6 @@ def get_elevation_TerrainTiles(coords, lenv=0, pointsDone=0, zoom=10):
         #print(f"calculated distance: {dist}")
     zoom = cntr
     
-    
-    
-
 
     tile_dict = {}
     for idx, (lat, lon) in enumerate(coords):
@@ -3660,10 +3590,6 @@ def HexagonInnerText():
     textobj = tName
     
 def HexagonOuterText():
-    # ---------------------------------------------------------------
-    # 六边形全边文字模式 (支持标题 + 5行数据)
-    # ---------------------------------------------------------------
-    
     outersize = size * ( 1 + outerBorderSize/100)
     thickness = plateThickness
     textSize = bpy.context.scene.tp3d.textSize
@@ -3672,7 +3598,6 @@ def HexagonOuterText():
     if textSize2 == 0:
         textSize2 = textSize
     
-    # 1. 创建底板六边形
     verts = []
     faces = []
     for i in range(6):
@@ -3711,10 +3636,7 @@ def HexagonOuterText():
     
 
     dist = (outersize - size)/4 + size/2
-    
-    # 定义6个位置的配置
-    # 顺序：标题(顶), 文字4(右上), 时间(右下), 海拔(底), 距离(左下), 文字5(左上)
-    # 角度：90, 30, 330, 270, 210, 150
+
     text_configs = [
         {"id": "t_name",      "angle": 90,  "default": "Name", "is_title": True},
         {"id": "t_text4",     "angle": 30,  "default": "Text4", "is_title": False},
@@ -3991,7 +3913,7 @@ def OctagonOuterText():
     verts = []
     faces = []
 
-    # Create vertices for octagon
+
     for i in range(num_sides):
         angle = math.radians(360 / num_sides * i + 22.5)
         x = outersize / 2 * math.cos(angle)
@@ -5169,9 +5091,6 @@ def midpoint_spherical(lat1, lon1, lat2, lon2):
     return math.degrees(lat_mid), math.degrees(lon_mid)
 
 def move_coordinates(lat, lon, distance_km, direction):
-    """
-    Move a point a given distance (in km) in a cardinal direction (N, S, E, W).
-    """
     R = 6371.0  # Earth radius in km
     direction = direction.lower()
     
@@ -5567,8 +5486,6 @@ def runGeneration(type):
         opentopoAdress = selfHosted
         print(f"!!使用 {opentopoAdress} 替代 Opentopodata!!")
     
-    
-
     
     #CHECK FOR VALID INPUTS
     if type == 0 or type == 4:
