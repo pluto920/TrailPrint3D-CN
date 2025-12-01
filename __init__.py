@@ -141,18 +141,10 @@ def load_bundled_font():
         print(f"加载字体出错: {e}")
         return None
 
-def shape_callback(self,context):
-    #print(f"Shape: {self.shape}")
-    if self.shape == "HEXAGON INNER TEXT" or self.shape == "HEXAGON OUTER TEXT" or self.shape =="OCTAGON OUTER TEXT" or self.shape == "HEXAGON FRONT TEXT":
-        try:
-            bpy.utils.register_class(MY_PT_Shapes)
-        except RuntimeError:
-            pass
-    else:
-        try:
-            bpy.utils.unregister_class(MY_PT_Shapes)
-        except RuntimeError:
-            pass
+def shape_callback(self, context):
+    for area in context.screen.areas:
+        area.tag_redraw()
+    return None
 
 # Cache the collection names
 def get_external_collections(path):
@@ -214,10 +206,23 @@ class MyProperties(bpy.types.PropertyGroup):
             ("CIRCLE", "圆形", "圆形地图"),
             ("HEXAGON INNER TEXT", "六边形（内文字）", "带内文字的六边形地图"),
             ("HEXAGON OUTER TEXT", "六边形（外文字）", "带背板与外文字的六边形地图"),
-            ("HEXAGON FRONT TEXT", "六边形（前文字）", "带背板并在正面的文字")
+            ("HEXAGON FRONT TEXT", "六边形（前文字）", "带背板并在正面的文字"),
+            ("POLAROID", "宝丽来相框", "经典的拍立得风格"),
         ],
         default = "HEXAGON",
         update = shape_callback #calls shape_callback when user selects diffrent shape to register the Shape Panel
+    )# type: ignore
+    
+    polaroid_format: bpy.props.EnumProperty(
+        name="相纸规格",
+        items=[
+            ("CLASSIC", "宝丽来经典 (SX-70)", "最经典的方构图 (8.8x10.7cm)"),
+            ("INSTAX_SQUARE", "富士方形 (Instax Square)", "小方形 (7.2x8.6cm)"),
+            ("INSTAX_MINI", "富士迷你 (Instax Mini)", "竖构图卡片 (5.4x8.6cm)"),
+            ("INSTAX_WIDE", "富士宽幅 (Instax Wide)", "横构图宽幅 (10.8x8.6cm)"),
+        ],
+        default="CLASSIC",
+        description="选择要模仿的拍立得相纸规格"
     )# type: ignore
     
     api: bpy.props.EnumProperty(
@@ -407,29 +412,24 @@ class MY_OT_ExportSTL(bpy.types.Operator):
 
     def execute(self, context):
         
-        global exportPath
-        exportPath = bpy.context.scene.tp3d.get('export_path', None)
-
-        if exportPath == None:
-            show_message_box("导出目录为空，请选择用于保存成品的文件夹")
-            return {'FINISHED'}
-    
-        exportPath = bpy.path.abspath(exportPath)
-
-        if not exportPath or exportPath == "":
-            show_message_box("导出目录为空，请选择有效的文件夹")
-            return {'FINISHED'}
-        if not os.path.isdir(exportPath):
-            show_message_box(f"导出目录无效：{exportPath}，请选择有效的目录")
-            return {'FINISHED'}
+        selection = context.selected_objects
         
-        if not bpy.context.selected_objects:
+        if not selection:
             show_message_box("请先选择要导出的对象")
             return{'FINISHED'}
         
-        export_selected_to_STL()
-
+        final_export_list = set(selection)
         
+        for obj in selection:
+            if obj.children:
+                for child in obj.children:
+                    final_export_list.add(child)
+                    if child.children:
+                        for grand_child in child.children:
+                            final_export_list.add(grand_child)
+        
+        export_selected_to_STL(list(final_export_list))
+
         return {'FINISHED'}
 
 
@@ -498,7 +498,7 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         mapping.inputs['Location'].default_value = (0, 0, 0)
 
     def create_floating_text(self, text_str, location, size, col, is_title=False):
-
+        # 创建文字曲线数据
         font_curve = bpy.data.curves.new(type="FONT", name="Render_Text_Data")
         font_curve.body = text_str
         font_curve.align_x = 'LEFT'
@@ -541,10 +541,12 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         props = context.scene.tp3d
         
         target_objs = context.selected_objects
+        
         if not target_objs:
             self.report({'WARNING'}, "请先选中地图！")
             return {'CANCELLED'}
 
+        # 设置渲染参数
         scene.render.resolution_x = 1920
         scene.render.resolution_y = 1080
         scene.render.engine = 'BLENDER_EEVEE'
@@ -556,27 +558,36 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
                 scene.eevee.use_soft_shadows = True
         except: pass
 
+        # ------------------- 修复 1：更彻底的清理逻辑 -------------------
         col_name = "XHS_Studio_Collection"
         if col_name in bpy.data.collections:
             col = bpy.data.collections[col_name]
             
             objs_to_remove = []
             for obj in col.objects:
-                if obj in target_objs or obj.type == 'MESH':
+                # 绝对不删除选中的地图对象
+                if obj in target_objs:
                     continue
-                objs_to_remove.append(obj)
+                
+                # 删除相机、灯光、以及生成的文字对象（通过名称或类型判断）
+                # 'FONT' 类型覆盖了悬浮文字，Render_Text 是名字特征
+                if obj.type in {'LIGHT', 'CAMERA', 'FONT'} or "Render_Text" in obj.name:
+                    objs_to_remove.append(obj)
             
             for obj in objs_to_remove:
                 bpy.data.objects.remove(obj, do_unlink=True)
         else:
             col = bpy.data.collections.new(col_name)
             context.scene.collection.children.link(col)
+        # --------------------------------------------------------------
 
+        # 计算包围盒
         min_v = Vector((float('inf'), float('inf'), float('inf')))
         max_v = Vector((float('-inf'), float('-inf'), float('-inf')))
         
         for obj in target_objs:
-            if obj.type == 'MESH' and "_Text" not in obj.name and "_Plate" not in obj.name:
+            # 给非文字/非底板的 Mesh 上色
+            if obj.type == 'MESH' and "_Text" not in obj.name and "_Plate" not in obj.name and "_Frame" not in obj.name:
                 self.create_terrain_shader(obj)
             
             for corner in obj.bound_box:
@@ -589,8 +600,15 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         map_size_vec = max_v - min_v
         map_radius = max(map_size_vec.x, map_size_vec.y) / 2
         
-        map_bottom_z = min_v.z
-
+        # ------------------- 修复 2：基准高度修正 -------------------
+        # 原代码使用的是 min_v.z (最低点)。
+        # 对于宝丽来底座，最低点是 Z=-5mm (底座底部)，导致文字生成在地下。
+        # 我们改为使用 max_v.z (最高点) 或者至少是 Z=0 平面以上。
+        # 考虑到有些山峰很高，用 max_v.z 会让字飘在山顶，我们可以取 (min_v.z + max_v.z)/2 或者 max_v.z。
+        # 这里为了稳妥，让字飘在模型顶部，确保不穿模。
+        
+        text_base_z = max_v.z 
+        # --------------------------------------------------------------
 
         d_name = props.trailName if props.trailName else "我的轨迹"
         
@@ -610,9 +628,12 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         num_lines = len(lines_to_show)
         if num_lines > 0:
             data_block_height = (num_lines - 1) * line_step
-            title_z_pos = map_bottom_z + data_block_height + title_data_gap
+            # 从最高点向上偏移，保证文字在上方
+            title_z_pos = text_base_z + title_data_gap 
+            # 如果觉得太高，想在侧面，可以把 title_z_pos 改为 text_base_z * 0.5
+            # 但为了不穿模，使用顶部基准是最安全的
         else:
-            title_z_pos = map_bottom_z
+            title_z_pos = text_base_z
 
         padding = map_radius * 0.2
         text_x = max_v.x + padding
@@ -642,6 +663,7 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         final_size = max_v - min_v
         final_max_dim = max(final_size.x, final_size.y)
 
+        # 创建相机
         cam_data = bpy.data.cameras.new("XHS_Camera")
         cam_obj = bpy.data.objects.new("XHS_Camera", cam_data)
         col.objects.link(cam_obj)
@@ -657,7 +679,7 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
             context.scene.view_settings.view_transform = 'Standard'
         context.scene.view_settings.look = 'High Contrast' 
 
-
+        # 灯光设置
         light_main = bpy.data.lights.new("Key", 'SUN')
         light_main.energy = 2.0
         light_main.angle = math.radians(20) 
@@ -666,7 +688,6 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         col.objects.link(obj_main)
         obj_main.rotation_euler = (math.radians(50), math.radians(10), math.radians(30))
         
-
         light_rim = bpy.data.lights.new("Rim", 'SUN') 
         light_rim.energy = 4.0 
         light_rim.color = (0.2, 0.6, 1.0) 
@@ -675,7 +696,6 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         col.objects.link(obj_rim)
         obj_rim.rotation_euler = (math.radians(60), 0, math.radians(220))
 
-
         light_fill = bpy.data.lights.new("Fill", 'SUN')
         light_fill.energy = 4.0 
         light_fill.color = (0.7, 0.7, 0.8) 
@@ -683,12 +703,13 @@ class MY_OT_SetupXHSRender(bpy.types.Operator):
         col.objects.link(obj_fill)
         obj_fill.rotation_euler = (math.radians(80), 0, math.radians(160))
 
-
+        # 开启节点材质
         context.scene.world.use_nodes = True
         bg_node = context.scene.world.node_tree.nodes['Background']
         bg_node.inputs['Color'].default_value = (0.05, 0.05, 0.07, 1) 
         bg_node.inputs['Strength'].default_value = 1.0
 
+        # 切换视图
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
                 for space in area.spaces:
@@ -1417,6 +1438,8 @@ class MY_PT_Generate(bpy.types.Panel):
         layout.label(text = "生成模型")
         layout.operator("wm.run_my_script", icon='PLAY', text="生成 3D 地图")
         layout.separator()
+        layout.operator("wm.run_my_script5", icon='EXPORT', text="导出模型")
+        layout.separator()
         box = layout.box()
         box.prop(props, "file_path")
         box.prop(props, "export_path")
@@ -1460,9 +1483,6 @@ class MY_PT_Advanced(bpy.types.Panel):
         layout = self.layout
         props = context.scene.tp3d 
         
-        box = layout.box()
-        box.label(text = "手动将所选对象导出为 STL/OBJ")
-        box.operator("wm.run_my_script5")
 
         layout.prop(props,"show_map", icon="TRIA_DOWN" if props.show_map else "TRIA_RIGHT", emboss=True)
         if props.show_map:
@@ -1718,28 +1738,88 @@ class MY_PT_Shapes(bpy.types.Panel):
     bl_region_type = "UI"
     bl_category = "TrailPrint3D"
     
+    @classmethod
+    def poll(cls, context):
+        if not hasattr(context.scene, "tp3d"):
+            return False
+        shape = context.scene.tp3d.shape
+        # 在这里列出所有需要显示该面板的形状
+        allowed_shapes = {
+            "HEXAGON INNER TEXT", 
+            "HEXAGON OUTER TEXT", 
+            "OCTAGON OUTER TEXT", 
+            "HEXAGON FRONT TEXT", 
+            "POLAROID"
+        }
+        return shape in allowed_shapes
+    
     def draw(self, context):
         layout = self.layout
-        props = context.scene.tp3d  # Get properties
+        props = context.scene.tp3d
         
-        #print(f"shape: {props.shape}")
-        if props.shape == "HEXAGON INNER TEXT" or props.shape == "HEXAGON OUTER TEXT" or props.shape == "OCTAGON OUTER TEXT" or props.shape == "HEXAGON FRONT TEXT":
-
-            #Add input fields
-            layout.prop(props, "textFont")
-            layout.prop(props, "textSize")
-            layout.prop(props, "textSizeTitle")
+        # 1. 宝丽来专属：规格选择
+        if props.shape == "POLAROID":
+            box = layout.box()
+            box.label(text="拍立得规格:", icon='IMAGE_DATA')
+            box.prop(props, "polaroid_format", text="")
             layout.separator()
-            layout.label(text = "覆盖文字：")
-            layout.prop(props, "overwriteHeight")
-            layout.prop(props, "overwriteTime")
-            layout.prop(props, "overwriteLength")
-            layout.prop(props, "overwriteText4")
-            layout.prop(props, "overwriteText5")
-            layout.prop(props, "plateThickness")
-            layout.prop(props, "outerBorderSize")
-            layout.prop(props, "plateInsertValue")
-            layout.prop(props, "text_angle_preset")
+            
+        # 2. 通用文字设置 (判断逻辑：包含宝丽来)
+        show_text_settings = (
+            props.shape == "HEXAGON INNER TEXT" or 
+            props.shape == "HEXAGON OUTER TEXT" or 
+            props.shape == "OCTAGON OUTER TEXT" or 
+            props.shape == "HEXAGON FRONT TEXT" or 
+            props.shape == "POLAROID"  # <--- 关键！加上这一行
+        )
+
+        if show_text_settings:
+            # 字体文件
+            box = layout.box()
+            if props.textFont == "":
+                box.label(text="当前字体: 默认 (阿里普惠-特粗)", icon='FONT_DATA')
+            else:
+                fname = os.path.basename(props.textFont)
+                box.label(text=f"当前字体: {fname}", icon='FILE_FONT')
+            box.prop(props, "textFont") 
+
+            layout.separator()
+            
+            # 字号
+            col = layout.column(align=True)
+            col.prop(props, "textSize")
+            col.prop(props, "textSizeTitle")
+            
+            layout.separator()
+            layout.label(text = "覆盖文字内容：", icon='TEXT')
+            
+            # 文字输入框
+            col = layout.column(align=True)
+            
+            # 宝丽来模式下，给个友好的提示
+            if props.shape == "POLAROID":
+                col.prop(props, "overwriteHeight", text="底部数据 1 (↓)") 
+                col.prop(props, "overwriteLength", text="底部数据 2 (↓)")
+            else:
+                col.prop(props, "overwriteHeight")
+                col.prop(props, "overwriteLength")
+                col.prop(props, "overwriteTime")
+                col.prop(props, "overwriteText4")
+                col.prop(props, "overwriteText5")
+            
+            layout.separator()
+            
+            # 底板参数
+            box_plate = layout.box()
+            box_plate.label(text="底板参数:", icon='MOD_SOLIDIFY')
+            box_plate.prop(props, "plateThickness")
+            
+            # 宝丽来不需要边框百分比(固定比例)，其他形状需要
+            if props.shape != "POLAROID": 
+                box_plate.prop(props, "outerBorderSize")
+                
+            box_plate.prop(props, "plateInsertValue")
+            box_plate.prop(props, "text_angle_preset")
 
 
 class OBJECT_OT_ShowCustomPropsPopup(bpy.types.Operator):
@@ -1875,6 +1955,7 @@ def register():
     bpy.utils.register_class(MY_PT_Generate)
     bpy.utils.register_class(MY_PT_Advanced)
     bpy.utils.register_class(MY_PT_StudioSettings)
+    bpy.utils.register_class(MY_PT_Shapes)
     bpy.types.Scene.tp3d = bpy.props.PointerProperty(type=MyProperties)
 
     print("TrailPrint3D(CN) System Loaded.")
@@ -2572,6 +2653,12 @@ def create_curve_from_coordinates(coordinates):
     Create a curve in Blender based on a list of (x, y, z) coordinates.
     """
     # Create a new curve object
+    target_name = 'GPX_Curve_Object'
+    # 查找所有叫这个名字的（包括 .001 .002）
+    for obj in bpy.data.objects:
+        if obj.name.startswith("GPX_Curve"):
+            bpy.data.objects.remove(obj, do_unlink=True)
+            
     curve_data = bpy.data.curves.new('GPX_Curve', type='CURVE')
     curve_data.dimensions = '3D'
     polyline = curve_data.splines.new('POLY')
@@ -2606,13 +2693,31 @@ def create_curve_from_coordinates(coordinates):
     bpy.ops.curve.select_all(action='SELECT')
     #bpy.ops.curve.smooth()
     bpy.ops.object.mode_set(mode='OBJECT')
-
-
-
+    
     # Convert to mesh
     if shape == "HEXAGON INNER TEXT" or shape == "HEXAGON OUTER TEXT" or shape == "OCTAGON OUTER TEXT" or shape == "HEXAGON FRONT TEXT":
         #bpy.ops.object.convert(target='MESH')
         pass
+    
+    elif shape == "POLAROID":
+        # 处理底板 (白色)
+        if plateobj:
+            mat = bpy.data.materials.get("WHITE")
+            plateobj.data.materials.clear()
+            plateobj.data.materials.append(mat)
+            writeMetadata(plateobj, type="PLATE")
+            export_to_STL(plateobj)
+            
+        # 处理文字 (黑色)
+        if textobj:
+            mat = bpy.data.materials.get("BLACK")
+            textobj.data.materials.clear()
+            textobj.data.materials.append(mat)
+            # 稍微抬高一点，防止重叠闪烁
+            textobj.location.z = plateobj.location.z + 0.1 
+            export_to_STL(textobj)
+            
+    return curve_object    
 
 def simplify_curve(points_with_extra, min_distance=0.1000):
     """
@@ -2694,61 +2799,167 @@ def create_rectangle(width, height):
     
     return obj
 
+POLAROID_SPECS = {
+    "CLASSIC":       (77.0, 79.0, 5.5, 6.0, 22.0),
+    "INSTAX_SQUARE": (62.0, 62.0, 5.0, 10.0, 14.0),
+    "INSTAX_MINI":   (46.0, 62.0, 4.0, 6.0, 18.0), 
+    "INSTAX_WIDE":   (99.0, 62.0, 4.5, 6.0, 18.0),  
+}
 
-
-def create_circle(radius, num_segments=64):
+def get_polaroid_dims(size, format_key):
+    """根据用户设定的尺寸(以图片宽度为基准)计算其余尺寸"""
+    spec = POLAROID_SPECS.get(format_key, POLAROID_SPECS["CLASSIC"])
+    real_img_w, real_img_h, b_side, b_top, b_bottom = spec
     
-    # Ensure we are in Object Mode
-    try:
-        bpy.ops.object.mode_set(mode='OBJECT')
-    except:
-        pass
-
-    # Create a new mesh and object
-    mesh = bpy.data.meshes.new(name)
-    obj = bpy.data.objects.new(name, mesh)
+    scale = size / real_img_w
     
-
-    # Link object to the scene collection
-    bpy.context.collection.objects.link(obj)
-
-    # Generate circle vertices
-    verts = []
-    faces = []
+    img_w = size
+    img_h = real_img_h * scale
+    border_side = b_side * scale
+    border_top = b_top * scale
+    border_bottom = b_bottom * scale
     
-    for i in range(num_segments):
-        angle = math.radians(360 * i / num_segments)
-        x = radius * math.cos(angle)
-        y = radius * math.sin(angle)
-        verts.append((x, y, 0))
+    return img_w, img_h, border_side, border_top, border_bottom
 
-    # Create edges between consecutive points
-    edges = [(i, (i + 1) % num_segments) for i in range(num_segments)]
+def create_polaroid_plane(size):
+    """生成符合拍立得比例的地图平面"""
+    props = bpy.context.scene.tp3d
+    img_w, img_h, _, _, _ = get_polaroid_dims(size, props.polaroid_format)
+    
+    return create_rectangle(img_w, img_h)
 
-    # Create the mesh from data
-    mesh.from_pydata(verts, edges, [])  # No center vertex, no faces yet
-    mesh.update()
-
-    # Make the object active and switch to Edit Mode
-    bpy.context.view_layer.objects.active = obj
+def PolaroidFrame():
+    """生成宝丽来相框底座并刻字 (分离材质版) - 支持自定义字号修复版"""
+    
+    for temp in ["P_Title", "P_Data", "PolaroidFrame", "_White_Frame", "_Black_Text"]:
+        for obj in bpy.data.objects:
+            if obj.name.startswith(temp):
+                bpy.data.objects.remove(obj, do_unlink=True)
+                
+    props = bpy.context.scene.tp3d
+    size = props.objSize
+    
+    user_title_size = props.textSizeTitle
+    user_data_size = props.textSize
+    
+    img_w, img_h, b_side, b_top, b_bottom = get_polaroid_dims(size, props.polaroid_format)
+    
+    frame_w = img_w + b_side * 2
+    frame_h = img_h + b_top + b_bottom
+    thickness = props.plateThickness
+    
+    x_min = -img_w/2 - b_side
+    x_max = img_w/2 + b_side
+    y_min = -img_h/2 - b_bottom
+    y_max = img_h/2 + b_top
+    
+    verts = [(x_min, y_min, 0), (x_max, y_min, 0), (x_max, y_max, 0), (x_min, y_max, 0)]
+    faces = [[0, 1, 2, 3]]
+    
+    mesh = bpy.data.meshes.new("PolaroidFrame")
+    frame_obj = bpy.data.objects.new("PolaroidFrame", mesh)
+    bpy.context.collection.objects.link(frame_obj)
+    mesh.from_pydata(verts, [], faces)
+    
+    bpy.context.view_layer.objects.active = frame_obj
     bpy.ops.object.mode_set(mode='EDIT')
-
-    # Select all vertices and fill the circle
     bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.mesh.fill_grid()
-    
-    #bpy.ops.mesh.subdivide(number_cuts=max(int(num_subdivisions/15),0))
-    for _ in range(num_subdivisions-3):
-        bpy.ops.mesh.subdivide(number_cuts=1)  # 1 cut per loop for even refinement
-
-    # Switch back to Object Mode
+    bpy.ops.mesh.extrude_region_move(TRANSFORM_OT_translate={"value":(0, 0, -thickness)})
     bpy.ops.object.mode_set(mode='OBJECT')
+    
+    mod = frame_obj.modifiers.new("Bevel", 'BEVEL')
+    mod.width = size * 0.015
+    mod.segments = 3
+    bpy.ops.object.modifier_apply(modifier="Bevel")
+    
+    transform_MapObject(frame_obj, centerx, centery)
+    
+    chin_center_y = (y_min + (-img_h/2)) / 2
+    text_pos_y = chin_center_y + centery
+    text_pos_x = centerx
+    
+    t_title = name
+    
+    data_parts = []
+    if props.overwriteHeight: data_parts.append(props.overwriteHeight)
+    if props.overwriteLength: data_parts.append(props.overwriteLength)
+    
+    is_multiline = False
+    if not data_parts:
+        t_data = f"{time_str}  |  {total_length:.1f}km"
+    else:
+        t_data = "\n".join(data_parts)
+        if len(data_parts) > 1:
+            is_multiline = True
 
-    return obj
 
+    t_obj_1 = create_text("P_Title", t_title, (0,0,0), 1, (0,0,0), 0.8) 
+    bpy.context.view_layer.update() 
+    
+    max_w = frame_w * 0.85
+    
+    if user_title_size > 0:
+        current_h = t_obj_1.dimensions.y
+        if current_h == 0: current_h = 1.0
+        raw_scale_1 = user_title_size / current_h
+    else:
+        raw_scale_1 = min(size * 0.08, max_w / (t_obj_1.dimensions.x + 0.01)) * 0.9
 
+    if t_obj_1.dimensions.x * raw_scale_1 > max_w:
+        scale_1 = max_w / t_obj_1.dimensions.x
+    else:
+        scale_1 = raw_scale_1
 
+    t_obj_1.scale = (scale_1, scale_1, 1)
+    t_obj_1.location = (text_pos_x, text_pos_y + b_bottom*0.15, 0.2) 
 
+    t_obj_2 = create_text("P_Data", t_data, (0,0,0), 1, (0,0,0), 0.8)
+    bpy.context.view_layer.update()
+    
+    if user_data_size > 0:
+        ref_h = t_obj_1.dimensions.y / t_obj_1.scale.y 
+        if ref_h == 0: ref_h = 1.0
+        raw_scale_2 = user_data_size / ref_h
+    else:
+        if is_multiline:
+            raw_scale_2 = scale_1 * 0.7 
+        else:
+            raw_scale_2 = scale_1 * 0.55
+
+    if t_obj_2.dimensions.x * raw_scale_2 > max_w:
+        scale_2 = max_w / t_obj_2.dimensions.x
+    else:
+        scale_2 = raw_scale_2
+        
+    t_obj_2.scale = (scale_2, scale_2, 1)
+    
+
+    if is_multiline:
+        t_obj_2.data.space_line = 1.2
+        offset_y = -b_bottom * 0.28
+    else:
+        offset_y = -b_bottom * 0.18
+
+    t_obj_2.location = (text_pos_x, text_pos_y + offset_y, 0.2)
+
+    convert_text_to_mesh(t_obj_1.name, frame_obj.name, False)
+    convert_text_to_mesh(t_obj_2.name, frame_obj.name, False)
+    
+    bpy.ops.object.select_all(action='DESELECT')
+    t_obj_1.select_set(True)
+    t_obj_2.select_set(True)
+    bpy.context.view_layer.objects.active = t_obj_1
+    bpy.ops.object.join()
+    
+    final_text = bpy.context.active_object
+    final_text.name = name + "_Black_Text"
+    frame_obj.name = name + "_White_Frame"
+    
+    global plateobj, textobj
+    plateobj = frame_obj
+    textobj = final_text
+    
+    return frame_obj
 
 # Get real elevation for a point
 def get_elevation_single(lat, lon):
@@ -3351,23 +3562,45 @@ def export_to_STL(zobj):
     
     zobj.select_set(False)  # Select the object
 
-def export_selected_to_STL():
+def export_selected_to_STL(objects_override=None):
+    
+    import os
 
     exportPath = bpy.context.scene.tp3d.get('export_path', None)
-    selected_objects = bpy.context.selected_objects
+    
+    if exportPath == None:
+        show_message_box("导出目录为空，请选择用于保存成品的文件夹")
+        return {'FINISHED'}
+    exportPath = bpy.path.abspath(exportPath)
+    if not exportPath or exportPath == "":
+        show_message_box("导出目录为空，请选择有效的文件夹")
+        return {'FINISHED'}
+    if not os.path.isdir(exportPath):
+        show_message_box(f"导出目录无效：{exportPath}，请选择有效的目录")
+        return {'FINISHED'}
+    
+    if objects_override:
+        targets = objects_override
+    else:
+        targets = bpy.context.selected_objects
+
     active_obj = bpy.context.active_object
 
-    if not selected_objects:
+    if not targets:
             show_message_box("未选择任何对象")
             return('CANCELLED')
 
-    for zobj in selected_objects:
+    import os # 引入 os 库处理路径
+
+    for zobj in targets:
         bpy.ops.object.select_all(action='DESELECT')
         zobj.select_set(True)
         bpy.context.view_layer.objects.active = zobj
 
         if zobj.material_slots:  
-            bpy.ops.wm.obj_export(filepath=exportPath + zobj.name + ".obj",
+            final_path = os.path.join(exportPath, zobj.name + ".obj")
+            bpy.ops.wm.obj_export(
+                filepath=final_path,
                 export_selected_objects=True,
                 export_triangulated_mesh=True, 
                 apply_modifiers=True,
@@ -3375,24 +3608,18 @@ def export_selected_to_STL():
                 forward_axis="Y",
                 up_axis="Z",
                 )
-            #show_message_box("对象含材质，已导出为 OBJ","INFO","导出完成")
-            show_message_box("已导出至所选目录","INFO","导出完成")
         else:
-            bpy.ops.wm.stl_export(filepath=exportPath +  zobj.name + ".stl", export_selected_objects = True)
-            show_message_box("已导出至所选目录","INFO","导出完成")
-
+            final_path = os.path.join(exportPath, zobj.name + ".stl")
+            bpy.ops.wm.stl_export(filepath=final_path, export_selected_objects = True)
 
     bpy.ops.object.select_all(action='DESELECT')
-    for zobj in selected_objects:
-        zobj.select_set(True)
-    bpy.context.view_layer.objects.active = active_obj     
+    if targets:
+        for zobj in targets:
+            zobj.select_set(True)
+    if active_obj:
+        bpy.context.view_layer.objects.active = active_obj     
 
-
-    active_obj = bpy.context.active_object
-
-
-
-
+    show_message_box(f"已成功导出 {len(targets)} 个文件到：{exportPath}", "INFO", "导出成功")
 
 def zoom_camera_to_selected(obj):
     
@@ -5359,27 +5586,72 @@ def toggle_console():
             bpy.ops.wm.console_toggle()
     except Exception as e:
         print(f"无法切换控制台：{e}")
+ 
+def cleanup_previous_objects(base_name):
+    """精准清理旧对象，防止重复叠加和误删"""
+    # 1. 要清理的后缀列表
+    suffixes = [
+        "_Trail", "_Text", "_Plate", "_Map", 
+        "_Black_Text", "_White_Frame", "_Lithophane", "_Cutter",
+        "_Mark", "_LINES", "_Polaroid_Frame"
+    ]
+    
+    # 2. 要清理的临时对象名
+    temp_names = [
+        "Hexagon", "Rectangle", "Circle", "Shield", "RoundedRect", 
+        "Polaroid", "PolaroidFrame", "GPX_Curve_Object", 
+        "P_Title", "P_Data", "Render_Text_Data", "Render_Text_Info",
+        "CuttingPlane"
+    ]
+    
+    objs_to_remove = []
+    
+    for obj in bpy.data.objects:
+        # 检查主物体
+        if obj.name == base_name:
+            objs_to_remove.append(obj)
+            continue
+        # 检查后缀
+        if obj.name.startswith(base_name):
+            for suf in suffixes:
+                if obj.name.endswith(suf):
+                    objs_to_remove.append(obj)
+                    break
+        # 检查临时名
+        clean_name = obj.name.split(".")[0]
+        if clean_name in temp_names:
+            objs_to_remove.append(obj)
+            
+    for obj in list(set(objs_to_remove)):
+        try:
+            # 先从场景解绑，再删除，防止残留
+            for col in obj.users_collection:
+                col.objects.unlink(obj)
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except: pass
+    
+    # 清理孤儿数据
+    for block in bpy.data.meshes:
+        if block.users == 0: bpy.data.meshes.remove(block)
+    for block in bpy.data.curves:
+        if block.users == 0: bpy.data.curves.remove(block)
+    for block in bpy.data.materials:
+        if block.users == 0: bpy.data.materials.remove(block)
     
 def runGeneration(type):   
 
-    #CHECK BLENDER VERSION
-    # Minimum required version
+    # CHECK BLENDER VERSION
     required_version = (4, 5, 0)
-
     if bpy.app.version < required_version:
-        show_message_box(f"TrailPrint3D 2.1 需要 Blender {required_version[0]}.{required_version[1]} 及以上版本（当前为 {bpy.app.version_string}）")
+        show_message_box(f"需要 Blender {required_version[0]}.{required_version[1]} 或更高版本。")
         return
     
     start_time = time.time()
-
     toggle_console()
     
-    for i in range(30):
-        print(" ")
-    print("------------------------------------------------")
-    print("脚本已启动 - 请勿关闭此窗口")
-    print("------------------------------------------------")
-    print(" ")
+    print("\n------------------------------------------------")
+    print("脚本已启动 - 开始生成")
+    print("------------------------------------------------\n")
 
     # Path to your GPX file
     global gpx_file_path
@@ -5388,6 +5660,8 @@ def runGeneration(type):
     gpx_chain_path = bpy.context.scene.tp3d.get('chain_path', None)
     global exportPath
     exportPath = bpy.context.scene.tp3d.get('export_path', None)
+    
+    # ... (获取其他 global 变量，保持原样) ...
     global shape
     shape = (bpy.context.scene.tp3d.shape)
     global name
@@ -5546,7 +5820,12 @@ def runGeneration(type):
             #show_message_box(f"请在形状设置选项卡中选择字体")
             #toggle_console()
             #return
-        
+            
+    cleanup_previous_objects(name)
+    
+    global plateobj, textobj
+    plateobj = None
+    textobj = None
     
     if name == "":
         if type == 0 or type == 4:
@@ -5595,7 +5874,6 @@ def runGeneration(type):
     #try:
     if 1 == 1:
         if type == 0:
-            
             separate_paths = read_gpx_file()
         if type == 1:
             separate_paths = read_gpx_directory(gpx_chain_path)
@@ -5790,7 +6068,9 @@ def runGeneration(type):
         MapObject = create_hexagon(size/2)
     elif shape == "CIRCLE": #circle
         MapObject = create_circle(size/2)
-
+    elif shape == "POLAROID":
+    # 使用专用函数生成符合比例的矩形
+        MapObject = create_polaroid_plane(size)
     else:
         MapObject = create_hexagon(size/2)
     
@@ -5996,26 +6276,51 @@ def runGeneration(type):
         HexagonFrontText()
         obj.location.z += plateThickness
         curveObj.location.z += plateThickness
-    else:
-        pass
-        #BottomText()
-
-
+        
+    if shape == "POLAROID":
+        plateobj = PolaroidFrame() 
+   
     #SINGLE COLOR MODE
     if singleColorMode == 1:
         single_color_mode(curveObj,obj.name)
 
-
-
-
-    #PLATESHAPE INSERT
+    # PLATESHAPE INSERT
     dist = bpy.context.scene.tp3d.plateInsertValue
     if dist > 0:
-        if shape == "HEXAGON OUTER TEXT" or shape == "OCTAGON OUTER TEXT" or shape == "HEXAGON FRONT TEXT":
-            plate = bpy.data.objects.get(name + "_Plate")
-            plateInsert(plate, obj)
-            text = bpy.data.objects.get(name + "_Text")
-            text.location.z += dist
+        if shape == "HEXAGON OUTER TEXT" or shape == "OCTAGON OUTER TEXT" or shape == "HEXAGON FRONT TEXT" or shape == "POLAROID":
+            
+            target_plate_name = name + "_Plate"
+            if shape == "POLAROID":
+                target_plate_name = name + "_White_Frame"
+            
+            target_text_name = name + "_Text"
+            if shape == "POLAROID":
+                target_text_name = name + "_Black_Text"
+
+            plate = bpy.data.objects.get(target_plate_name)
+            text_obj_found = bpy.data.objects.get(target_text_name)
+
+            if plate and text_obj_found:
+                plateInsert(plate, obj)
+                text_obj_found.location.z += dist
+            else:
+                print(f"警告：未找到底板 ({target_plate_name}) 或文字 ({target_text_name})，跳过嵌入操作。")
+            
+    if shape == "POLAROID" and plateobj:
+        # 1. 绑定地形
+        obj.parent = plateobj
+        obj.matrix_parent_inverse = plateobj.matrix_world.inverted()
+        
+        # 2. 绑定路径
+        if curveObj:
+            curveObj.parent = plateobj
+            curveObj.matrix_parent_inverse = plateobj.matrix_world.inverted()
+
+        # 3. 绑定文字
+        if textobj:
+            textobj.parent = plateobj
+            textobj.matrix_parent_inverse = plateobj.matrix_world.inverted()
+    # -------------------------------------------------------------
     
 
     #ZOOM TO OBJECT
@@ -6055,21 +6360,42 @@ def runGeneration(type):
     export_to_STL(obj)
     
     if shape == "HEXAGON INNER TEXT" or shape == "HEXAGON OUTER TEXT" or shape == "OCTAGON OUTER TEXT" or shape == "HEXAGON FRONT TEXT":
-        tobj = textobj
-        mat = bpy.data.materials.get("WHITE")
-        if shape == "HEXAGON INNER TEXT":
-            mat = bpy.data.materials.get("TRAIL")
-        tobj.data.materials.clear()
-        tobj.data.materials.append(mat)
-        export_to_STL(tobj)
-    if shape == "HEXAGON OUTER TEXT" or shape == "OCTAGON OUTER TEXT" or shape == "HEXAGON FRONT TEXT":
-        plobj = plateobj
-        mat = bpy.data.materials.get("BLACK")
-        plobj.data.materials.clear()
-        plobj.data.materials.append(mat)
-        writeMetadata(plobj, type = "PLATE")
-        export_to_STL(plobj)
-    
+        # 处理文字
+        if textobj:
+            tobj = textobj
+            mat = bpy.data.materials.get("WHITE")
+            # 内嵌文字用红色，其他用白色
+            if shape == "HEXAGON INNER TEXT":
+                mat = bpy.data.materials.get("TRAIL")
+            tobj.data.materials.clear()
+            tobj.data.materials.append(mat)
+            export_to_STL(tobj)
+        
+        # 处理底板 (黑色)
+        if shape != "HEXAGON INNER TEXT" and plateobj:
+            plobj = plateobj
+            mat = bpy.data.materials.get("BLACK")
+            plobj.data.materials.clear()
+            plobj.data.materials.append(mat)
+            writeMetadata(plobj, type = "PLATE")
+            export_to_STL(plobj)
+
+    # 2. 宝丽来模式 (新增逻辑：白底黑字)
+    elif shape == "POLAROID":
+        # 处理底板 (白色)
+        if plateobj:
+            mat = bpy.data.materials.get("WHITE")
+            plateobj.data.materials.clear()
+            plateobj.data.materials.append(mat)
+            writeMetadata(plateobj, type="PLATE")
+            export_to_STL(plateobj)
+            
+        # 处理文字 (黑色)
+        if textobj:
+            mat = bpy.data.materials.get("BLACK")
+            textobj.data.materials.clear()
+            textobj.data.materials.append(mat)
+            export_to_STL(textobj)
     
     end_time = time.time()
     duration = end_time - start_time
